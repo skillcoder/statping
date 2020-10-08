@@ -1,44 +1,56 @@
 <template>
     <div class="col-12">
-        <div class="card contain-card text-black-50 bg-white mb-4">
-            <div class="card-header">Services
-                <router-link v-if="$store.state.admin" to="/dashboard/create_service" class="btn btn-sm btn-outline-success float-right">
-                <font-awesome-icon icon="plus"/>  Create
-            </router-link></div>
-            <div class="card-body">
+
+        <div class="card contain-card mb-4">
+            <div class="card-header">{{ $t('services') }}
+                <router-link v-if="$store.state.admin" to="/dashboard/create_service" class="btn btn-sm btn-success float-right">
+                    <font-awesome-icon icon="plus"/>  {{$t('create')}}
+                </router-link>
+            </div>
+            <div class="card-body pt-0">
                 <ServicesList/>
             </div>
         </div>
 
-        <div class="card contain-card text-black-50 bg-white mb-4">
-            <div class="card-header">Groups</div>
-            <div class="card-body">
-        <table class="table">
+        <div class="card contain-card mb-4">
+            <div class="card-header">{{ $t('groups') }}</div>
+            <div class="card-body pt-0">
+
+                <div v-if="groupsList.length === 0">
+                    <div class="alert alert-dark d-block mt-3 mb-0">
+                        You currently don't have any groups! Create one using the form below.
+                    </div>
+                </div>
+
+        <table v-else class="table">
             <thead>
             <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Services</th>
-                <th scope="col">Visibility</th>
+                <th scope="col">{{ $t('name') }}</th>
+                <th scope="col" class="d-none d-md-table-cell">{{ $tc('service', 2) }}</th>
+                <th scope="col">{{ $t('visibility') }}</th>
                 <th scope="col"></th>
             </tr>
             </thead>
 
             <draggable tag="tbody" v-model="groupsList" class="sortable_groups" handle=".drag_icon">
-            <tr v-for="(group, index) in $store.getters.groupsCleanInOrder" v-bind:key="group.id">
+            <tr v-for="(group, index) in groupsList" v-bind:key="group.id">
                 <td><span class="drag_icon d-none d-md-inline">
                     <font-awesome-icon icon="bars" class="mr-3" /></span> {{group.name}}
                 </td>
-                <td>{{$store.getters.servicesInGroup(group.id).length}}</td>
+                <td class="d-none d-md-table-cell">{{$store.getters.servicesInGroup(group.id).length}}</td>
                 <td>
-                    <span v-if="group.public" class="badge badge-primary">PUBLIC</span>
-                    <span v-if="!group.public" class="badge badge-secondary">PRIVATE</span>
+                    <span class="badge text-uppercase" :class="{'badge-primary': group.public, 'badge-secondary': !group.public}">
+                        {{group.public ? $t('public') : $t('private')}}
+                    </span>
                 </td>
                 <td class="text-right">
                     <div v-if="$store.state.admin" class="btn-group">
-                        <a @click.prevent="editGroup(group, edit)" href="#" class="btn btn-outline-secondary"><font-awesome-icon icon="chart-area" /> Edit</a>
-                        <a @click.prevent="deleteGroup(group)" href="#" class="btn btn-danger">
+                        <button @click.prevent="editGroup(group, edit)" href="#" class="btn btn-sm btn-outline-secondary">
+                            <font-awesome-icon icon="edit" />
+                        </button>
+                        <button @click.prevent="deleteGroup(group)" href="#" class="btn btn-sm btn-danger">
                             <font-awesome-icon icon="times" />
-                        </a>
+                        </button>
                     </div>
                 </td>
             </tr>
@@ -49,7 +61,6 @@
             </div>
         </div>
 
-
         <FormGroup v-if="$store.state.admin" :edit="editChange" :in_group="group"/>
 
     </div>
@@ -57,15 +68,17 @@
 </template>
 
 <script>
-  import FormGroup from "../../forms/Group";
+  const Modal = () => import(/* webpackChunkName: "dashboard" */ "@/components/Elements/Modal")
+  const FormGroup = () => import(/* webpackChunkName: "dashboard" */ '@/forms/Group')
+  const ToggleSwitch = () => import(/* webpackChunkName: "dashboard" */ '@/forms/ToggleSwitch')
+  const ServicesList = () => import(/* webpackChunkName: "dashboard" */ '@/components/Dashboard/ServicesList')
   import Api from "../../API";
-  import ToggleSwitch from "../../forms/ToggleSwitch";
-  import draggable from 'vuedraggable'
-  import ServicesList from './ServicesList';
+  const draggable = () => import(/* webpackChunkName: "dashboard" */ 'vuedraggable')
 
   export default {
       name: 'DashboardServices',
       components: {
+        Modal,
           ServicesList,
           ToggleSwitch,
           FormGroup,
@@ -93,9 +106,6 @@
               }
           }
       },
-      beforeMount() {
-
-      },
       methods: {
           editChange(v) {
               this.group = {}
@@ -105,20 +115,24 @@
               this.group = g
               this.edit = !mode
           },
-          reordered_services() {
+        confirm_delete(service) {
 
-          },
-          saveUpdatedOrder: function (e) {
-              window.console.log("saving...");
-              window.console.log(this.myViews.array()); // this.myViews.array is not a function
-          },
+        },
+        async delete(g) {
+          await Api.group_delete(g.id)
+          const groups = await Api.groups()
+          this.$store.commit('setGroups', groups)
+        },
           async deleteGroup(g) {
-              let c = confirm(`Are you sure you want to delete '${g.name}'?`)
-              if (c) {
-                  await Api.group_delete(g.id)
-                  const groups = await Api.groups()
-                  this.$store.commit('setGroups', groups)
-              }
+            const modal = {
+              visible: true,
+              title: "Delete Group",
+              body: `Are you sure you want to delete group ${g.name}? All services attached will be removed from this group.`,
+              btnColor: "btn-danger",
+              btnText: "Delete Group",
+              func: () => this.delete(g),
+            }
+            this.$store.commit("setModal", modal)
           }
       }
   }

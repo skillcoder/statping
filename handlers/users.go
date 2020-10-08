@@ -1,43 +1,31 @@
-// Statping
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/statping/statping
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package handlers
 
 import (
-	"errors"
 	"fmt"
 	"github.com/gorilla/mux"
+	"github.com/statping/statping/types/errors"
 	"github.com/statping/statping/types/users"
 	"github.com/statping/statping/utils"
 	"net/http"
 )
 
-func getUser(r *http.Request) (*users.User, int64, error) {
+func findUser(r *http.Request) (*users.User, int64, error) {
 	vars := mux.Vars(r)
+	if utils.NotNumber(vars["id"]) {
+		return nil, 0, errors.NotNumber
+	}
 	num := utils.ToInt(vars["id"])
 	user, err := users.Find(num)
 	if err != nil {
-		return nil, num, err
+		return nil, num, errors.Missing(&users.User{}, num)
 	}
 	return user, num, nil
 }
 
 func apiUserHandler(w http.ResponseWriter, r *http.Request) {
-	user, _, err := getUser(r)
+	user, _, err := findUser(r)
 	if err != nil {
-		sendErrorJson(err, w, r, http.StatusNotFound)
+		sendErrorJson(err, w, r)
 		return
 	}
 	user.Password = ""
@@ -45,15 +33,15 @@ func apiUserHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func apiUserUpdateHandler(w http.ResponseWriter, r *http.Request) {
-	user, id, err := getUser(r)
+	user, _, err := findUser(r)
 	if err != nil {
-		sendErrorJson(fmt.Errorf("user #%d was not found", id), w, r)
+		sendErrorJson(err, w, r)
 		return
 	}
 
 	err = DecodeJSON(r, &user)
 	if err != nil {
-		sendErrorJson(fmt.Errorf("user #%d was not found", id), w, r)
+		sendErrorJson(err, w, r)
 		return
 	}
 
@@ -75,13 +63,12 @@ func apiUserDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		sendErrorJson(errors.New("cannot delete the last user"), w, r)
 		return
 	}
-	user, _, err := getUser(r)
+	user, _, err := findUser(r)
 	if err != nil {
 		sendErrorJson(err, w, r)
 		return
 	}
-	err = user.Delete()
-	if err != nil {
+	if err := user.Delete(); err != nil {
 		sendErrorJson(err, w, r)
 		return
 	}
@@ -91,6 +78,23 @@ func apiUserDeleteHandler(w http.ResponseWriter, r *http.Request) {
 func apiAllUsersHandler(w http.ResponseWriter, r *http.Request) {
 	allUsers := users.All()
 	returnJson(allUsers, w, r)
+}
+
+func apiCheckUserTokenHandler(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	token := r.PostForm.Get("token")
+	if token == "" {
+		sendErrorJson(errors.New("missing token parameter"), w, r)
+		return
+	}
+
+	claim, err := parseToken(token)
+	if err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
+	returnJson(claim, w, r)
 }
 
 func apiCreateUsersHandler(w http.ResponseWriter, r *http.Request) {

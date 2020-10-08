@@ -6,26 +6,36 @@ import (
 )
 
 var (
-	allNotifiers []ServiceNotifier
+	allNotifiers = make(map[string]ServiceNotifier)
 )
 
-func AllNotifiers() []ServiceNotifier {
+func AllNotifiers() map[string]ServiceNotifier {
 	return allNotifiers
 }
 
+func ReturnNotifier(method string) ServiceNotifier {
+	return allNotifiers[method]
+}
+
 func FindNotifier(method string) *notifications.Notification {
-	for _, n := range allNotifiers {
+	n := allNotifiers[method]
+	if n != nil {
 		notif := n.Select()
-		if notif.Method == method {
-			return notif
+		no, err := notifications.Find(notif.Method)
+		if err != nil {
+			log.Error(err)
+			return nil
 		}
+		return notif.UpdateFields(no)
 	}
 	return nil
 }
 
 type ServiceNotifier interface {
-	OnSuccess(*Service) error                    // OnSuccess is triggered when a service is successful
-	OnFailure(*Service, *failures.Failure) error // OnFailure is triggered when a service is failing
-	OnTest() error                               // OnTest is triggered for testing
-	Select() *notifications.Notification         // OnTest is triggered for testing
+	OnSuccess(Service) (string, error)                   // OnSuccess is triggered when a service is successful
+	OnFailure(Service, failures.Failure) (string, error) // OnFailure is triggered when a service is failing
+	OnTest() (string, error)                             // OnTest is triggered for testing
+	OnSave() (string, error)                             // OnSave is triggered for testing
+	Select() *notifications.Notification                 // OnTest is triggered for testing
+	Valid(notifications.Values) error                    // Valid checks your form values
 }

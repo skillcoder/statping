@@ -1,12 +1,17 @@
 <template>
     <footer>
-        <div v-if="!$store.getters.core.footer" class="footer text-center mb-4 p-2">
-            <a href="https://github.com/statping/statping" target="_blank">
-                Statping {{$store.getters.core.version}} made with <font-awesome-icon style="color: #d40d0d" icon="heart"/>
-            </a> |
-            <router-link :to="$store.getters.core.logged_in ? '/dashboard' : '/login'">Dashboard</router-link>
+        <div v-if="!core.footer" class="footer text-center mb-4 p-2">
+          <div class="d-block text-dim">
+          <div class="mb-3">
+            <router-link class="links" :to="admin ? '/dashboard' : '/login'">{{$t('dashboard')}}</router-link>
+          </div>
+            <span class="font-1 mt-3">
+            <a href="https://github.com/statping/statping" class="statping" target="_blank">
+              Statping v{{core.version}} made with <font-awesome-icon icon="heart" class="hlight font-1"/></a>
+            </span>
+          </div>
         </div>
-        <div v-else class="footer text-center mb-4 p-2" v-html="$store.getters.core.footer"></div>
+        <div v-else class="footer text-center mb-4 p-2" v-html="core.footer"></div>
     </footer>
 </template>
 
@@ -18,18 +23,22 @@
   components: {
     Dashboard
   },
-  props: {
-    version: String,
-    logged_in: Boolean
-  },
-      watch: {
-          logged_in() {
-
-          }
-      }
+  computed: {
+      core() {
+        return this.$store.getters.core
+      },
+    commit() {
+      return this.$store.getters.core.commit.slice(0,8)
+    },
+    admin() {
+      return this.$store.getters.admin
+    },
+  }
 }
 </script>
 
-<!-- Add "scoped" attribute to limit CSS to this component only -->
 <style scoped>
+.hlight {
+  color: #f6cbcb;
+}
 </style>

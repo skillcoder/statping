@@ -1,46 +1,39 @@
-//// Statping
-//// Copyright (C) 2018.  Hunter Long and the project contributors
-//// Written by Hunter Long <info@socialeck.com> and the project contributors
-////
-//// https://github.com/statping/statping
-////
-//// The licenses for most software and other practical works are designed
-//// to take away your freedom to share and change the works.  By contrast,
-//// the GNU General Public License is intended to guarantee your freedom to
-//// share and change all versions of a program--to make sure it remains free
-//// software for all its users.
-////
-//// You should have received a copy of the GNU General Public License
-//// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-//
 package handlers
 
 import (
-	"encoding/json"
-	"fmt"
 	"github.com/gorilla/mux"
+	"github.com/statping/statping/types/errors"
+	"github.com/statping/statping/types/failures"
 	"github.com/statping/statping/types/notifications"
-	"github.com/statping/statping/types/null"
 	"github.com/statping/statping/types/services"
-	"github.com/statping/statping/utils"
 	"net/http"
+	"sort"
 )
 
 func apiNotifiersHandler(w http.ResponseWriter, r *http.Request) {
-	notifiers := services.AllNotifiers()
-	returnJson(notifiers, w, r)
+	var notifs []notifications.Notification
+	for _, n := range services.AllNotifiers() {
+		notif := n.Select()
+		no, err := notifications.Find(notif.Method)
+		if err != nil {
+			log.Error(err)
+			sendErrorJson(err, w, r)
+		}
+		notif.UpdateFields(no)
+		notifs = append(notifs, *notif)
+	}
+	sort.Sort(notifications.NotificationOrder(notifs))
+	returnJson(notifs, w, r)
 }
 
 func apiNotifierGetHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	notif := services.FindNotifier(vars["notifier"])
-	notifer, err := notifications.Find(notif.Method)
-	if err != nil {
-		sendErrorJson(err, w, r)
+	notifer := services.FindNotifier(vars["notifier"])
+	if notifer == nil {
+		sendErrorJson(errors.New("could not find notifier"), w, r)
 		return
 	}
-	notif = notif.UpdateFields(notifer)
-	returnJson(notif, w, r)
+	returnJson(notifer, w, r)
 }
 
 func apiNotifierUpdateHandler(w http.ResponseWriter, r *http.Request) {
@@ -51,81 +44,71 @@ func apiNotifierUpdateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var notif *notifications.Notification
-	decoder := json.NewDecoder(r.Body)
-	err = decoder.Decode(&notif)
-	if err != nil {
+	if err := DecodeJSON(r, &notifer); err != nil {
 		sendErrorJson(err, w, r)
 		return
 	}
-	notifer = notifer.UpdateFields(notif)
-	err = notifer.Update()
-	if err != nil {
+
+	log.Infof("Updating %s Notifier", notifer.Title)
+
+	if err := notifer.Update(); err != nil {
 		sendErrorJson(err, w, r)
 		return
 	}
-	//notifications.OnSave(notifer.Method)
+
+	notif := services.ReturnNotifier(notifer.Method)
+	if err := notif.Valid(notifer.Values()); err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
+	if _, err := notif.OnSave(); err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
 	sendJsonAction(vars["notifier"], "update", w, r)
 }
 
-func testNotificationHandler(w http.ResponseWriter, r *http.Request) {
-	var err error
-	form := parseForm(r)
-	vars := mux.Vars(r)
-	method := vars["method"]
-	enabled := form.Get("enable")
-	host := form.Get("host")
-	port := int(utils.ToInt(form.Get("port")))
-	username := form.Get("username")
-	password := form.Get("password")
-	var1 := form.Get("var1")
-	var2 := form.Get("var2")
-	apiKey := form.Get("api_key")
-	apiSecret := form.Get("api_secret")
-	limits := int(utils.ToInt(form.Get("limits")))
+type testNotificationReq struct {
+	Method       string                     `json:"method"`
+	Notification notifications.Notification `json:"notifier"`
+}
 
-	notifier, err := notifications.Find(method)
-	if err != nil {
-		log.Errorln(fmt.Sprintf("issue saving notifier %v: %v", method, err))
+func testNotificationHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	n := services.FindNotifier(vars["notifier"])
+	if n == nil {
+		sendErrorJson(errors.New("unknown notifier"), w, r)
+		return
+	}
+
+	var req testNotificationReq
+	if err := DecodeJSON(r, &req); err != nil {
 		sendErrorJson(err, w, r)
 		return
 	}
 
-	n := notifier
+	notif := services.ReturnNotifier(n.Method)
 
-	if host != "" {
-		n.Host = host
+	var out string
+	var err error
+	if req.Method == "success" {
+		out, err = notif.OnSuccess(services.Example(true))
+	} else {
+		out, err = notif.OnFailure(services.Example(false), failures.Example())
 	}
-	if port != 0 {
-		n.Port = port
-	}
-	if username != "" {
-		n.Username = username
-	}
-	if password != "" && password != "##########" {
-		n.Password = password
-	}
-	if var1 != "" {
-		n.Var1 = var1
-	}
-	if var2 != "" {
-		n.Var2 = var2
-	}
-	if apiKey != "" {
-		n.ApiKey = apiKey
-	}
-	if apiSecret != "" {
-		n.ApiSecret = apiSecret
-	}
-	if limits != 0 {
-		n.Limits = limits
-	}
-	n.Enabled = null.NewNullBool(enabled == "on")
 
-	//err = notifications.OnTest(notifier)
-	//if err == nil {
-	//	w.Write([]byte("ok"))
-	//} else {
-	//	w.Write([]byte(err.Error()))
-	//}
+	resp := &notifierTestResp{
+		Success:  err == nil,
+		Response: out,
+		Error:    err,
+	}
+	returnJson(resp, w, r)
+}
+
+type notifierTestResp struct {
+	Success  bool   `json:"success"`
+	Response string `json:"response,omitempty"`
+	Error    error  `json:"error,omitempty"`
 }

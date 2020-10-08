@@ -1,34 +1,28 @@
-// Statup
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/hunterlong/statup
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package handlers
 
 import (
 	"github.com/gorilla/mux"
-	"github.com/pkg/errors"
+	"github.com/statping/statping/types/errors"
 	"github.com/statping/statping/types/groups"
 	"github.com/statping/statping/utils"
 	"net/http"
 )
 
-func selectGroup(r *http.Request) (*groups.Group, error) {
+func findGroup(r *http.Request) (*groups.Group, error) {
 	vars := mux.Vars(r)
+	if utils.NotNumber(vars["id"]) {
+		return nil, errors.NotNumber
+	}
 	id := utils.ToInt(vars["id"])
+	if id == 0 {
+		return nil, errors.IDMissing
+	}
 	g, err := groups.Find(id)
 	if err != nil {
 		return nil, err
+	}
+	if !g.Public.Bool && !IsReadAuthenticated(r) {
+		return nil, errors.NotAuthenticated
 	}
 	return g, nil
 }
@@ -41,9 +35,9 @@ func apiAllGroupHandler(r *http.Request) interface{} {
 
 // apiGroupHandler will show a single group
 func apiGroupHandler(w http.ResponseWriter, r *http.Request) {
-	group, err := selectGroup(r)
+	group, err := findGroup(r)
 	if err != nil {
-		sendErrorJson(errors.Wrap(err, "group not found"), w, r, http.StatusNotFound)
+		sendErrorJson(err, w, r)
 		return
 	}
 	returnJson(group, w, r)
@@ -51,10 +45,9 @@ func apiGroupHandler(w http.ResponseWriter, r *http.Request) {
 
 // apiGroupUpdateHandler will update a group
 func apiGroupUpdateHandler(w http.ResponseWriter, r *http.Request) {
-	group, err := selectGroup(r)
+	group, err := findGroup(r)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		sendErrorJson(errors.Wrap(err, "group not found"), w, r)
+		sendErrorJson(err, w, r)
 		return
 	}
 
@@ -89,9 +82,9 @@ func apiCreateGroupHandler(w http.ResponseWriter, r *http.Request) {
 
 // apiGroupDeleteHandler accepts a DELETE method to delete groups
 func apiGroupDeleteHandler(w http.ResponseWriter, r *http.Request) {
-	group, err := selectGroup(r)
+	group, err := findGroup(r)
 	if err != nil {
-		sendErrorJson(errors.Wrap(err, "group not found"), w, r)
+		sendErrorJson(err, w, r)
 		return
 	}
 

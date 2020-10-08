@@ -4,9 +4,12 @@ import (
 	"compress/gzip"
 	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/statping/statping/types/core"
+	"github.com/statping/statping/types/errors"
+	"github.com/statping/statping/types/metrics"
 	"github.com/statping/statping/utils"
 	"io"
 	"net/http"
@@ -90,9 +93,17 @@ func sendLog(next http.Handler) http.Handler {
 	})
 }
 
+// scoped is a middleware handler that will remove private fields based on struct tags
+// this will look for the `scope:"user,admin"` tag and remove the JSON field from response
+// if user is not authenticated based on the scope.
 func scoped(handler func(r *http.Request) interface{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data := handler(r)
+		err, ok := data.(error)
+		if ok {
+			sendErrorJson(err, w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(scope{data: data, scope: ScopeName(r)})
 	})
@@ -114,7 +125,7 @@ func authenticated(handler func(w http.ResponseWriter, r *http.Request), redirec
 }
 
 // readOnly is a middleware function to check if user is a User before running original request
-func readOnly(handler func(w http.ResponseWriter, r *http.Request), redirect bool) http.Handler {
+func readOnly(handler http.Handler, redirect bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !IsReadAuthenticated(r) {
 			if redirect {
@@ -124,7 +135,7 @@ func readOnly(handler func(w http.ResponseWriter, r *http.Request), redirect boo
 			}
 			return
 		}
-		handler(w, r)
+		handler.ServeHTTP(w, r)
 	})
 }
 
@@ -156,4 +167,24 @@ func cached(duration, contentType string, handler func(w http.ResponseWriter, r 
 			}
 		}
 	})
+}
+
+// prometheusMiddleware implements mux.MiddlewareFunc.
+func prometheusMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route := mux.CurrentRoute(r)
+		path, _ := route.GetPathTemplate()
+		timer := prometheus.NewTimer(metrics.Timer(path))
+		next.ServeHTTP(w, r)
+		timer.ObserveDuration()
+	})
+}
+
+func DecodeJSON(r *http.Request, obj interface{}) error {
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&obj)
+	if err != nil {
+		return errors.DecodeJSON
+	}
+	return r.Body.Close()
 }

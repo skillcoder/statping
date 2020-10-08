@@ -2,6 +2,7 @@ package hits
 
 import (
 	"github.com/statping/statping/database"
+	"github.com/statping/statping/types/metrics"
 	"github.com/statping/statping/utils"
 )
 
@@ -13,16 +14,20 @@ func SetDB(database database.Database) {
 	db = database.Model(&Hit{})
 }
 
-func Find(id int64) (*Hit, error) {
-	var group Hit
-	q := db.Where("id = ?", id).Find(&group)
-	return &group, q.Error()
+func (h *Hit) AfterFind() {
+	metrics.Query("hit", "find")
 }
 
-func All() []*Hit {
-	var hits []*Hit
-	db.Find(&hits)
-	return hits
+func (h *Hit) AfterUpdate() {
+	metrics.Query("hit", "update")
+}
+
+func (h *Hit) AfterDelete() {
+	metrics.Query("hit", "delete")
+}
+
+func (h *Hit) AfterCreate() {
+	metrics.Query("hit", "create")
 }
 
 func (h *Hit) Create() error {

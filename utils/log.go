@@ -1,18 +1,3 @@
-// Statping
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/statping/statping
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package utils
 
 import (
@@ -31,14 +16,57 @@ import (
 )
 
 var (
-	Log         = Logger.StandardLogger()
-	ljLogger    *lumberjack.Logger
-	LastLines   []*logRow
-	LockLines   sync.Mutex
-	VerboseMode int
+	Log          = Logger.StandardLogger()
+	ljLogger     *lumberjack.Logger
+	LastLines    []*logRow
+	LockLines    sync.Mutex
+	VerboseMode  int
+	allowReports bool
 )
 
-const logFilePath = "/logs/statping.log"
+const (
+	logFilePath   = "/logs/statping.log"
+	errorReporter = "https://ddf2784201134d51a20c3440e222cebe@sentry.statping.com/4"
+)
+
+func SentryInit(allow bool) {
+	allowReports = allow
+	goEnv := Params.GetString("GO_ENV")
+	allowReports := Params.GetBool("ALLOW_REPORTS")
+	if allow || goEnv == "test" || allowReports {
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              errorReporter,
+			Environment:      goEnv,
+			Release:          Params.GetString("VERSION"),
+			AttachStacktrace: true,
+		}); err != nil {
+			Log.Errorln(err)
+		}
+		Log.Infoln("Error Reporting initiated, thank you!")
+	}
+}
+
+func SentryErr(err error) {
+	if !allowReports {
+		return
+	}
+	sentry.CaptureException(err)
+}
+
+func sentryTags() map[string]string {
+	val := make(map[string]string)
+	val["database"] = Params.GetString("DB_CONN")
+	return val
+}
+
+func SentryLogEntry(entry *Logger.Entry) {
+	e := sentry.NewEvent()
+	e.Message = entry.Message
+	e.Tags = sentryTags()
+	e.Release = Params.GetString("VERSION")
+	e.Contexts = entry.Data
+	sentry.CaptureEvent(e)
+}
 
 type hook struct {
 	Entries []Logger.Entry
@@ -47,6 +75,9 @@ type hook struct {
 
 func (t *hook) Fire(e *Logger.Entry) error {
 	pushLastLine(e.Message)
+	if e.Level == Logger.ErrorLevel && allowReports {
+		SentryLogEntry(e)
+	}
 	return nil
 }
 
@@ -109,35 +140,35 @@ func replaceVal(d interface{}) interface{} {
 // createLog will create the '/logs' directory based on a directory
 func createLog(dir string) error {
 	if !FolderExists(dir + "/logs") {
-		CreateDirectory(dir + "/logs")
+		return CreateDirectory(dir + "/logs")
 	}
 	return nil
 }
 
 // InitLogs will create the '/logs' directory and creates a file '/logs/statup.log' for application logging
 func InitLogs() error {
+	InitEnvs()
+	if Params.GetBool("DISABLE_LOGS") {
+		return nil
+	}
 	if err := createLog(Directory); err != nil {
 		return err
 	}
 	ljLogger = &lumberjack.Logger{
 		Filename:   Directory + logFilePath,
-		MaxSize:    16,
-		MaxBackups: 5,
-		MaxAge:     28,
+		MaxSize:    Params.GetInt("LOGS_MAX_SIZE"),
+		MaxBackups: Params.GetInt("LOGS_MAX_COUNT"),
+		MaxAge:     Params.GetInt("LOGS_MAX_AGE"),
 	}
 
 	mw := io.MultiWriter(os.Stdout, ljLogger)
 	Log.SetOutput(mw)
 
 	Log.SetFormatter(&Logger.TextFormatter{
-		ForceColors:   true,
-		DisableColors: false,
+		ForceColors:   !Params.GetBool("DISABLE_COLORS"),
+		DisableColors: Params.GetBool("DISABLE_COLORS"),
 	})
 	checkVerboseMode()
-
-	sentry.CaptureMessage("It works!")
-
-	LastLines = make([]*logRow, 0)
 	return nil
 }
 
@@ -166,9 +197,12 @@ func checkVerboseMode() {
 
 // CloseLogs will close the log file correctly on shutdown
 func CloseLogs() {
-	ljLogger.Rotate()
-	Log.Writer().Close()
-	ljLogger.Close()
+	if ljLogger != nil {
+		ljLogger.Rotate()
+		Log.Writer().Close()
+		ljLogger.Close()
+	}
+	sentry.Flush(5 * time.Second)
 }
 
 func pushLastLine(line interface{}) {

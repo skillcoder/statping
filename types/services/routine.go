@@ -2,9 +2,9 @@ package services
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"fmt"
-	"github.com/statping/statping/types/core"
-	"google.golang.org/grpc"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,18 +12,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/statping/statping/types/metrics"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+
 	"github.com/statping/statping/types/failures"
 	"github.com/statping/statping/types/hits"
 	"github.com/statping/statping/utils"
-	"github.com/tatsushid/go-fastping"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // checkServices will start the checking go routine for each service
 func CheckServices() {
 	log.Infoln(fmt.Sprintf("Starting monitoring process for %v Services", len(allServices)))
 	for _, s := range allServices {
-		//go CheckinRoutine()
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		go ServiceCheckQueue(s, true)
 	}
 }
@@ -31,7 +35,7 @@ func CheckServices() {
 // CheckQueue is the main go routine for checking a service
 func ServiceCheckQueue(s *Service, record bool) {
 	s.Start()
-	s.Checkpoint = time.Now()
+	s.Checkpoint = utils.Now()
 	s.SleepDuration = (time.Duration(s.Id) * 100) * time.Millisecond
 
 CheckLoop:
@@ -44,19 +48,17 @@ CheckLoop:
 			s.CheckService(record)
 			s.UpdateStats()
 			s.Checkpoint = s.Checkpoint.Add(s.Duration())
-			sleep := s.Checkpoint.Sub(time.Now())
 			if !s.Online {
 				s.SleepDuration = s.Duration()
 			} else {
-				s.SleepDuration = sleep
+				s.SleepDuration = s.Checkpoint.Sub(time.Now())
 			}
 		}
-		continue
 	}
 }
 
 func parseHost(s *Service) string {
-	if s.Type == "tcp" || s.Type == "udp" {
+	if s.Type == "tcp" || s.Type == "udp" || s.Type == "grpc" {
 		return s.Domain
 	} else {
 		u, err := url.Parse(s.Domain)
@@ -72,7 +74,7 @@ func dnsCheck(s *Service) (int64, error) {
 	var err error
 	t1 := utils.Now()
 	host := parseHost(s)
-	if s.Type == "tcp" {
+	if s.Type == "tcp" || s.Type == "udp" || s.Type == "grpc" {
 		_, err = net.LookupHost(host)
 	} else {
 		_, err = net.LookupIP(host)
@@ -80,9 +82,7 @@ func dnsCheck(s *Service) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	t2 := time.Now()
-	subTime := t2.Sub(t1).Microseconds()
-	return subTime, err
+	return utils.Now().Sub(t1).Microseconds(), err
 }
 
 func isIPv6(address string) bool {
@@ -90,44 +90,70 @@ func isIPv6(address string) bool {
 }
 
 // checkIcmp will send a ICMP ping packet to the service
-func CheckIcmp(s *Service, record bool) *Service {
+func CheckIcmp(s *Service, record bool) (*Service, error) {
 	defer s.updateLastCheck()
+	timer := prometheus.NewTimer(metrics.ServiceTimer(s.Name))
+	defer timer.ObserveDuration()
 
-	p := fastping.NewPinger()
-	resolveIP := "ip4:icmp"
-	if isIPv6(s.Domain) {
-		resolveIP = "ip6:icmp"
-	}
-	ra, err := net.ResolveIPAddr(resolveIP, s.Domain)
+	dur, err := utils.Ping(s.Domain, s.Timeout)
 	if err != nil {
-		recordFailure(s, fmt.Sprintf("Could not send ICMP to service %v, %v", s.Domain, err))
-		return s
+		if record {
+			RecordFailure(s, fmt.Sprintf("Could not send ICMP to service %v, %v", s.Domain, err), "lookup")
+		}
+		return s, err
 	}
-	p.AddIPAddr(ra)
-	p.OnRecv = func(addr *net.IPAddr, rtt time.Duration) {
-		s.Latency = rtt.Microseconds()
-		recordSuccess(s)
-	}
-	err = p.Run()
-	if err != nil {
-		recordFailure(s, fmt.Sprintf("Issue running ICMP to service %v, %v", s.Domain, err))
-		return s
-	}
+
+	s.PingTime = dur
+	s.Latency = dur
 	s.LastResponse = ""
-	return s
+	s.Online = true
+	if record {
+		RecordSuccess(s)
+	}
+	return s, nil
 }
 
 // CheckGrpc will check a gRPC service
-func CheckGrpc(s *Service, record bool) *Service {
+func CheckGrpc(s *Service, record bool) (*Service, error) {
 	defer s.updateLastCheck()
+	timer := prometheus.NewTimer(metrics.ServiceTimer(s.Name))
+	defer timer.ObserveDuration()
 
+	// Strip URL scheme if present. Eg: https:// , http://
+	if strings.Contains(s.Domain, "://") {
+		u, err := url.Parse(s.Domain)
+		if err != nil {
+			// Unable to parse.
+			log.Warnln(fmt.Sprintf("GRPC Service: '%s', Unable to parse URL: '%v'", s.Name, s.Domain))
+			if record {
+				RecordFailure(s, fmt.Sprintf("Unable to parse GRPC domain %v, %v", s.Domain, err), "parse_domain")
+			}
+		}
+
+		// Set domain as hostname without port number.
+		s.Domain = u.Hostname()
+	}
+
+	// Calculate DNS check time
 	dnsLookup, err := dnsCheck(s)
 	if err != nil {
 		if record {
-			recordFailure(s, fmt.Sprintf("Could not get IP address for GRPC service %v, %v", s.Domain, err))
+			RecordFailure(s, fmt.Sprintf("Could not get IP address for GRPC service %v, %v", s.Domain, err), "lookup")
 		}
-		return s
+		return s, err
 	}
+
+	// Connect to grpc service without TLS certs.
+	grpcOption := grpc.WithInsecure()
+
+	// Check if TLS is enabled
+	// Upgrade GRPC connection if using TLS
+	// Force to connect on HTTP2 with TLS. Needed when using a reverse proxy such as nginx.
+	if s.VerifySSL.Bool {
+		h2creds := credentials.NewTLS(&tls.Config{NextProtos: []string{"h2"}})
+		grpcOption = grpc.WithTransportCredentials(h2creds)
+	}
+
 	s.PingTime = dnsLookup
 	t1 := utils.Now()
 	domain := fmt.Sprintf("%v", s.Domain)
@@ -137,41 +163,85 @@ func CheckGrpc(s *Service, record bool) *Service {
 			domain = fmt.Sprintf("[%v]:%v", s.Domain, s.Port)
 		}
 	}
-	conn, err := grpc.Dial(domain, grpc.WithInsecure(), grpc.WithBlock())
-	if err != nil {
-		log.Fatalf("did not connect: %v", err)
-	}
+
+	// Context will cancel the request when timeout is exceeded.
+	// Cancel the context when request is served within the timeout limit.
+	timeout := time.Duration(s.Timeout) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, domain, grpcOption, grpc.WithBlock())
 	if err != nil {
 		if record {
-			recordFailure(s, fmt.Sprintf("Dial Error %v", err))
+			RecordFailure(s, fmt.Sprintf("Dial Error %v", err), "connection")
 		}
-		return s
+		return s, err
 	}
+
+	if s.GrpcHealthCheck.Bool {
+		// Create a new health check client
+		c := healthpb.NewHealthClient(conn)
+		in := &healthpb.HealthCheckRequest{}
+		res, err := c.Check(ctx, in)
+		if err != nil {
+			if record {
+				RecordFailure(s, fmt.Sprintf("GRPC Error %v", err), "healthcheck")
+			}
+			return s, nil
+		}
+
+		// Record responses
+		s.LastResponse = strings.TrimSpace(res.String())
+		s.LastStatusCode = int(res.GetStatus())
+	}
+
 	if err := conn.Close(); err != nil {
 		if record {
-			recordFailure(s, fmt.Sprintf("%v Socket Close Error %v", strings.ToUpper(s.Type), err))
+			RecordFailure(s, fmt.Sprintf("%v Socket Close Error %v", strings.ToUpper(s.Type), err), "close")
 		}
-		return s
+		return s, err
 	}
-	t2 := utils.Now()
-	s.Latency = t2.Sub(t1).Microseconds()
-	s.LastResponse = ""
+
+	// Record latency
+	s.Latency = utils.Now().Sub(t1).Microseconds()
+	s.Online = true
+
+	if s.GrpcHealthCheck.Bool {
+		if s.ExpectedStatus != s.LastStatusCode {
+			if record {
+				RecordFailure(s, fmt.Sprintf("GRPC Service: '%s', Status Code: expected '%v', got '%v'", s.Name, s.ExpectedStatus, s.LastStatusCode), "response_code")
+			}
+			return s, nil
+		}
+
+		if s.Expected.String != s.LastResponse {
+			log.Warnln(fmt.Sprintf("GRPC Service: '%s', Response: expected '%v', got '%v'", s.Name, s.Expected.String, s.LastResponse))
+			if record {
+				RecordFailure(s, fmt.Sprintf("GRPC Response Body '%v' did not match '%v'", s.LastResponse, s.Expected.String), "response_body")
+			}
+			return s, nil
+		}
+	}
+
 	if record {
-		recordSuccess(s)
+		RecordSuccess(s)
 	}
-	return s
+
+	return s, nil
 }
 
 // checkTcp will check a TCP service
-func CheckTcp(s *Service, record bool) *Service {
+func CheckTcp(s *Service, record bool) (*Service, error) {
 	defer s.updateLastCheck()
+	timer := prometheus.NewTimer(metrics.ServiceTimer(s.Name))
+	defer timer.ObserveDuration()
 
 	dnsLookup, err := dnsCheck(s)
 	if err != nil {
 		if record {
-			recordFailure(s, fmt.Sprintf("Could not get IP address for TCP service %v, %v", s.Domain, err))
+			RecordFailure(s, fmt.Sprintf("Could not get IP address for TCP service %v, %v", s.Domain, err), "lookup")
 		}
-		return s
+		return s, err
 	}
 	s.PingTime = dnsLookup
 	t1 := utils.Now()
@@ -182,26 +252,45 @@ func CheckTcp(s *Service, record bool) *Service {
 			domain = fmt.Sprintf("[%v]:%v", s.Domain, s.Port)
 		}
 	}
-	conn, err := net.DialTimeout(s.Type, domain, time.Duration(s.Timeout)*time.Second)
+
+	tlsConfig, err := s.LoadTLSCert()
 	if err != nil {
-		if record {
-			recordFailure(s, fmt.Sprintf("Dial Error %v", err))
-		}
-		return s
+		log.Errorln(err)
 	}
-	if err := conn.Close(); err != nil {
-		if record {
-			recordFailure(s, fmt.Sprintf("%v Socket Close Error %v", strings.ToUpper(s.Type), err))
+
+	// test TCP connection if there is no TLS Certificate set
+	if s.TLSCert.String == "" {
+		conn, err := net.DialTimeout(s.Type, domain, time.Duration(s.Timeout)*time.Second)
+		if err != nil {
+			if record {
+				RecordFailure(s, fmt.Sprintf("Dial Error: %v", err), "tls")
+			}
+			return s, err
 		}
-		return s
+		defer conn.Close()
+	} else {
+		// test TCP connection if TLS Certificate was set
+		dialer := &net.Dialer{
+			KeepAlive: time.Duration(s.Timeout) * time.Second,
+			Timeout:   time.Duration(s.Timeout) * time.Second,
+		}
+		conn, err := tls.DialWithDialer(dialer, s.Type, domain, tlsConfig)
+		if err != nil {
+			if record {
+				RecordFailure(s, fmt.Sprintf("Dial Error: %v", err), "tls")
+			}
+			return s, err
+		}
+		defer conn.Close()
 	}
-	t2 := utils.Now()
-	s.Latency = t2.Sub(t1).Microseconds()
+
+	s.Latency = utils.Now().Sub(t1).Microseconds()
 	s.LastResponse = ""
+	s.Online = true
 	if record {
-		recordSuccess(s)
+		RecordSuccess(s)
 	}
-	return s
+	return s, nil
 }
 
 func (s *Service) updateLastCheck() {
@@ -209,15 +298,17 @@ func (s *Service) updateLastCheck() {
 }
 
 // checkHttp will check a HTTP service
-func CheckHttp(s *Service, record bool) *Service {
+func CheckHttp(s *Service, record bool) (*Service, error) {
 	defer s.updateLastCheck()
+	timer := prometheus.NewTimer(metrics.ServiceTimer(s.Name))
+	defer timer.ObserveDuration()
 
 	dnsLookup, err := dnsCheck(s)
 	if err != nil {
 		if record {
-			recordFailure(s, fmt.Sprintf("Could not get IP address for domain %v, %v", s.Domain, err))
+			RecordFailure(s, fmt.Sprintf("Could not get IP address for domain %v, %v", s.Domain, err), "lookup")
 		}
-		return s
+		return s, err
 	}
 	s.PingTime = dnsLookup
 	t1 := utils.Now()
@@ -225,29 +316,57 @@ func CheckHttp(s *Service, record bool) *Service {
 	timeout := time.Duration(s.Timeout) * time.Second
 	var content []byte
 	var res *http.Response
-
+	var data *bytes.Buffer
 	var headers []string
+	contentType := "application/json" // default Content-Type
+
 	if s.Headers.Valid {
 		headers = strings.Split(s.Headers.String, ",")
 	} else {
 		headers = nil
 	}
 
-	if s.Method == "POST" {
-		content, res, err = utils.HttpRequest(s.Domain, s.Method, "application/json", headers, bytes.NewBuffer([]byte(s.PostData.String)), timeout, s.VerifySSL.Bool)
-	} else {
-		content, res, err = utils.HttpRequest(s.Domain, s.Method, nil, headers, nil, timeout, s.VerifySSL.Bool)
+	// check if 'Content-Type' header was defined
+	for _, header := range headers {
+		if strings.Split(header, "=")[0] == "Content-Type" {
+			contentType = strings.Split(header, "=")[1]
+			break
+		}
 	}
+
+	if s.Redirect.Bool {
+		headers = append(headers, "Redirect=true")
+	}
+
+	if s.PostData.String != "" {
+		data = bytes.NewBuffer([]byte(s.PostData.String))
+	} else {
+		data = bytes.NewBuffer(nil)
+	}
+
+	// force set Content-Type to 'application/json' if requests are made
+	// with POST method
+	if s.Method == "POST" && contentType != "application/json" {
+		contentType = "application/json"
+	}
+
+	customTLS, err := s.LoadTLSCert()
+	if err != nil {
+		log.Errorln(err)
+	}
+
+	content, res, err = utils.HttpRequest(s.Domain, s.Method, contentType, headers, data, timeout, s.VerifySSL.Bool, customTLS)
 	if err != nil {
 		if record {
-			recordFailure(s, fmt.Sprintf("HTTP Error %v", err))
+			RecordFailure(s, fmt.Sprintf("HTTP Error %v", err), "request")
 		}
-		return s
+		return s, err
 	}
-	t2 := utils.Now()
-	s.Latency = t2.Sub(t1).Microseconds()
+	s.Latency = utils.Now().Sub(t1).Microseconds()
 	s.LastResponse = string(content)
 	s.LastStatusCode = res.StatusCode
+
+	metrics.Gauge("status_code", float64(res.StatusCode), s.Name)
 
 	if s.Expected.String != "" {
 		match, err := regexp.MatchString(s.Expected.String, string(content))
@@ -256,25 +375,26 @@ func CheckHttp(s *Service, record bool) *Service {
 		}
 		if !match {
 			if record {
-				recordFailure(s, fmt.Sprintf("HTTP Response Body did not match '%v'", s.Expected))
+				RecordFailure(s, fmt.Sprintf("HTTP Response Body did not match '%v'", s.Expected), "regex")
 			}
-			return s
+			return s, err
 		}
 	}
 	if s.ExpectedStatus != res.StatusCode {
 		if record {
-			recordFailure(s, fmt.Sprintf("HTTP Status Code %v did not match %v", res.StatusCode, s.ExpectedStatus))
+			RecordFailure(s, fmt.Sprintf("HTTP Status Code %v did not match %v", res.StatusCode, s.ExpectedStatus), "status_code")
 		}
-		return s
+		return s, err
 	}
 	if record {
-		recordSuccess(s)
+		RecordSuccess(s)
 	}
-	return s
+	s.Online = true
+	return s, err
 }
 
-// recordSuccess will create a new 'hit' record in the database for a successful/online service
-func recordSuccess(s *Service) {
+// RecordSuccess will create a new 'hit' record in the database for a successful/online service
+func RecordSuccess(s *Service) {
 	s.LastOnline = utils.Now()
 	s.Online = true
 	hit := &hits.Hit{
@@ -290,45 +410,13 @@ func recordSuccess(s *Service) {
 		fmt.Sprintf("Service #%d '%v' Successful Response: %s | Lookup in: %s | Online: %v | Interval: %d seconds", s.Id, s.Name, humanMicro(hit.Latency), humanMicro(hit.PingTime), s.Online, s.Interval))
 	s.LastLookupTime = hit.PingTime
 	s.LastLatency = hit.Latency
+	metrics.Gauge("online", 1., s.Name, s.Type)
+	metrics.Inc("success", s.Name)
 	sendSuccess(s)
-	s.SuccessNotified = true
 }
 
-func AddNotifier(n ServiceNotifier) {
-	allNotifiers = append(allNotifiers, n)
-}
-
-func sendSuccess(s *Service) {
-	if !s.AllowNotifications.Bool {
-		return
-	}
-	// dont send notification if server was already previous online
-	if s.SuccessNotified {
-		return
-	}
-
-	// dont send notification if server recently started (60 seconds)
-	if core.App.Started.Add(60 * time.Second).After(utils.Now()) {
-		s.SuccessNotified = true
-		return
-	}
-	for _, n := range allNotifiers {
-		notif := n.Select()
-		if notif.CanSend() {
-			log.Infof("Sending notification to: %s!", notif.Method)
-			if err := n.OnSuccess(s); err != nil {
-				log.Errorln(err)
-			}
-			s.UserNotified = true
-			s.SuccessNotified = true
-			//s.UpdateNotify.Bool
-		}
-	}
-	s.notifyAfterCount = 0
-}
-
-// recordFailure will create a new 'Failure' record in the database for a offline service
-func recordFailure(s *Service, issue string) {
+// RecordFailure will create a new 'Failure' record in the database for a offline service
+func RecordFailure(s *Service, issue, reason string) {
 	s.LastOffline = utils.Now()
 
 	fail := &failures.Failure{
@@ -337,6 +425,7 @@ func recordFailure(s *Service, issue string) {
 		PingTime:  s.PingTime,
 		CreatedAt: utils.Now(),
 		ErrorCode: s.LastStatusCode,
+		Reason:    reason,
 	}
 	log.WithFields(utils.ToFields(fail, s)).
 		Warnln(fmt.Sprintf("Service %v Failing: %v | Lookup in: %v", s.Name, issue, humanMicro(fail.PingTime)))
@@ -345,38 +434,18 @@ func recordFailure(s *Service, issue string) {
 		log.Error(err)
 	}
 	s.Online = false
-	s.SuccessNotified = false
 	s.DownText = s.DowntimeText()
+
+	limitOffset := len(s.Failures)
+	if len(s.Failures) >= limitFailures {
+		limitOffset = limitFailures - 1
+	}
+
+	s.Failures = append([]*failures.Failure{fail}, s.Failures[:limitOffset]...)
+
+	metrics.Gauge("online", 0., s.Name, s.Type)
+	metrics.Inc("failure", s.Name)
 	sendFailure(s, fail)
-}
-
-func sendFailure(s *Service, f *failures.Failure) {
-	if !s.AllowNotifications.Bool {
-		return
-	}
-
-	// ignore failure if user was already notified and
-	// they have "continuous notifications" switched off.
-	if s.UserNotified && !s.UpdateNotify.Bool {
-		return
-	}
-
-	if s.NotifyAfter == 0 || s.notifyAfterCount > s.NotifyAfter {
-		for _, n := range allNotifiers {
-			notif := n.Select()
-			if notif.CanSend() {
-				log.Infof("Sending Failure notification to: %s!", notif.Method)
-				if err := n.OnFailure(s, f); err != nil {
-					log.Errorln(err)
-				}
-				s.UserNotified = true
-				s.SuccessNotified = true
-				//s.UpdateNotify.Bool
-			}
-		}
-	}
-
-	s.notifyAfterCount++
 }
 
 // Check will run checkHttp for HTTP services and checkTcp for TCP services

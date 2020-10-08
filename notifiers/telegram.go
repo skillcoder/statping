@@ -1,18 +1,3 @@
-// Statup
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/hunterlong/statup
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package notifiers
 
 import (
@@ -22,6 +7,7 @@ import (
 	"github.com/statping/statping/types/failures"
 	"github.com/statping/statping/types/notifications"
 	"github.com/statping/statping/types/notifier"
+	"github.com/statping/statping/types/null"
 	"github.com/statping/statping/types/services"
 	"github.com/statping/statping/utils"
 	"net/url"
@@ -39,6 +25,10 @@ func (t *telegram) Select() *notifications.Notification {
 	return t.Notification
 }
 
+func (t *telegram) Valid(values notifications.Values) error {
+	return nil
+}
+
 var Telegram = &telegram{&notifications.Notification{
 	Method:      "telegram",
 	Title:       "Telegram",
@@ -47,6 +37,9 @@ var Telegram = &telegram{&notifications.Notification{
 	AuthorUrl:   "https://github.com/hunterlong",
 	Icon:        "fab fa-telegram-plane",
 	Delay:       time.Duration(5 * time.Second),
+	SuccessData: null.NewNullString("Your service '{{.Service.Name}}' is currently online!"),
+	FailureData: null.NewNullString("Your service '{{.Service.Name}}' is currently offline!"),
+	DataType:    "text",
 	Limits:      60,
 	Form: []notifications.NotificationForm{{
 		Type:        "text",
@@ -57,49 +50,54 @@ var Telegram = &telegram{&notifications.Notification{
 		Required:    true,
 	}, {
 		Type:        "text",
-		Title:       "Channel or User ID",
-		Placeholder: "789325392",
-		SmallText:   "Insert your Telegram Channel ID or User ID here.",
-		DbField:     "Var1",
+		Title:       "Channel",
+		Placeholder: "@statping_channel",
+		SmallText:   "Insert your Telegram Channel including the @ symbol. The bot will need to be an administrator of this channel.",
+		DbField:     "var1",
 		Required:    true,
 	}}},
 }
 
 // Send will send a HTTP Post to the Telegram API. It accepts type: string
-func (t *telegram) sendMessage(message string) error {
-	apiEndpoint := fmt.Sprintf("https://api.telegram.org/bot%v/sendMessage", t.ApiSecret)
+func (t *telegram) sendMessage(message string) (string, error) {
+	apiEndpoint := fmt.Sprintf("https://api.telegram.org/bot%v/sendMessage", t.ApiSecret.String)
 
 	v := url.Values{}
-	v.Set("chat_id", t.Var1)
+	v.Set("chat_id", t.Var1.String)
 	v.Set("text", message)
-	rb := *strings.NewReader(v.Encode())
 
-	contents, _, err := utils.HttpRequest(apiEndpoint, "GET", "application/x-www-form-urlencoded", nil, &rb, time.Duration(10*time.Second), true)
+	contents, _, err := utils.HttpRequest(apiEndpoint, "POST", "application/x-www-form-urlencoded", nil, strings.NewReader(v.Encode()), time.Duration(10*time.Second), true, nil)
 
 	success, _ := telegramSuccess(contents)
 	if !success {
 		errorOut := telegramError(contents)
 		out := fmt.Sprintf("Error code %v - %v", errorOut.ErrorCode, errorOut.Description)
-		return errors.New(out)
+		return string(contents), errors.New(out)
 	}
-	return err
+	return string(contents), err
 }
 
 // OnFailure will trigger failing service
-func (t *telegram) OnFailure(s *services.Service, f *failures.Failure) error {
-	msg := fmt.Sprintf("Your service '%v' is currently offline!", s.Name)
+func (t *telegram) OnFailure(s services.Service, f failures.Failure) (string, error) {
+	msg := ReplaceVars(t.FailureData.String, s, f)
 	return t.sendMessage(msg)
 }
 
 // OnSuccess will trigger successful service
-func (t *telegram) OnSuccess(s *services.Service) error {
-	msg := fmt.Sprintf("Your service '%v' is currently online!", s.Name)
+func (t *telegram) OnSuccess(s services.Service) (string, error) {
+	msg := ReplaceVars(t.SuccessData.String, s, failures.Failure{})
 	return t.sendMessage(msg)
 }
 
 // OnTest will test the Twilio SMS messaging
-func (t *telegram) OnTest() error {
-	msg := fmt.Sprintf("Testing the Twilio SMS Notifier on your Statping server")
+func (t *telegram) OnTest() (string, error) {
+	msg := fmt.Sprintf("Testing the Telegram Notifier on your Statping server")
+	return t.sendMessage(msg)
+}
+
+// OnSave will trigger when this notifier is saved
+func (t *telegram) OnSave() (string, error) {
+	msg := fmt.Sprintf("The Telegram Notifier on your Statping server was just saved")
 	return t.sendMessage(msg)
 }
 

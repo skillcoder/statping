@@ -1,18 +1,3 @@
-// Statping
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/statping/statping
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package notifiers
 
 import (
@@ -41,6 +26,10 @@ func (l *lineNotifier) Select() *notifications.Notification {
 	return l.Notification
 }
 
+func (l *lineNotifier) Valid(values notifications.Values) error {
+	return nil
+}
+
 var LineNotify = &lineNotifier{&notifications.Notification{
 	Method:      lineNotifyMethod,
 	Title:       "LINE Notify",
@@ -58,28 +47,36 @@ var LineNotify = &lineNotifier{&notifications.Notification{
 }
 
 // Send will send a HTTP Post with the Authorization to the notify-api.line.me server. It accepts type: string
-func (l *lineNotifier) sendMessage(message string) error {
+func (l *lineNotifier) sendMessage(message string) (string, error) {
 	v := url.Values{}
 	v.Set("message", message)
-	headers := []string{fmt.Sprintf("Authorization=Bearer %v", l.ApiSecret)}
-	_, _, err := utils.HttpRequest("https://notify-api.line.me/api/notify", "POST", "application/x-www-form-urlencoded", headers, strings.NewReader(v.Encode()), time.Duration(10*time.Second), true)
-	return err
+	headers := []string{fmt.Sprintf("Authorization=Bearer %v", l.ApiSecret.String)}
+	content, _, err := utils.HttpRequest("https://notify-api.line.me/api/notify", "POST", "application/x-www-form-urlencoded", headers, strings.NewReader(v.Encode()), time.Duration(10*time.Second), true, nil)
+	return string(content), err
 }
 
 // OnFailure will trigger failing service
-func (l *lineNotifier) OnFailure(s *services.Service, f *failures.Failure) error {
-	msg := fmt.Sprintf("Your service '%v' is currently offline!", s.Name)
-	return l.sendMessage(msg)
+func (l *lineNotifier) OnFailure(s services.Service, f failures.Failure) (string, error) {
+	msg := fmt.Sprintf("Your service '%v' is currently offline! %s", s.Name, f.Issue)
+	out, err := l.sendMessage(msg)
+	return out, err
 }
 
 // OnSuccess will trigger successful service
-func (l *lineNotifier) OnSuccess(s *services.Service) error {
+func (l *lineNotifier) OnSuccess(s services.Service) (string, error) {
 	msg := fmt.Sprintf("Service %s is online!", s.Name)
-	return l.sendMessage(msg)
+	out, err := l.sendMessage(msg)
+	return out, err
 }
 
 // OnTest triggers when this notifier has been saved
-func (l *lineNotifier) OnTest() error {
+func (l *lineNotifier) OnTest() (string, error) {
 	msg := fmt.Sprintf("Testing if Line Notifier is working!")
-	return l.sendMessage(msg)
+	_, err := l.sendMessage(msg)
+	return msg, err
+}
+
+// OnSave will trigger when this notifier is saved
+func (l *lineNotifier) OnSave() (string, error) {
+	return "", nil
 }

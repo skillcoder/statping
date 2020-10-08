@@ -1,18 +1,3 @@
-// Statping
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/statping/statping
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package utils
 
 import (
@@ -29,12 +14,23 @@ func HashPassword(password string) string {
 	return string(bytes)
 }
 
+// CheckHash returns true if the password matches with a hashed bcrypt password
+func CheckHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
 // NewSHA1Hash returns a random SHA1 hash based on a specific length
 func NewSHA256Hash() string {
 	d := make([]byte, 10)
 	rand.Seed(Now().UnixNano())
 	rand.Read(d)
 	return fmt.Sprintf("%x", sha256.Sum256(d))
+}
+
+// NewSHA1Hash returns a random SHA1 hash based on a specific length
+func Sha256Hash(val string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(val)))
 }
 
 var characterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")

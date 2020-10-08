@@ -2,65 +2,51 @@ package database
 
 import (
 	"fmt"
-	"github.com/statping/statping/types"
 	"github.com/statping/statping/utils"
-	"os"
 	"time"
 
 	_ "github.com/jinzhu/gorm/dialects/mysql"
 	_ "github.com/jinzhu/gorm/dialects/postgres"
-	_ "github.com/jinzhu/gorm/dialects/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 var (
-	log               = utils.Log
-	removeRowsAfter   = types.Day * 90
-	maintenceDuration = types.Hour
+	log = utils.Log.WithField("type", "database")
 )
 
-func StartMaintenceRoutine() {
-	dur := os.Getenv("REMOVE_AFTER")
-	var removeDur time.Duration
-
-	if dur != "" {
-		parsedDur, err := time.ParseDuration(dur)
-		if err != nil {
-			log.Errorf("could not parse duration: %s, using default: %s", dur, removeRowsAfter.String())
-			removeDur = removeRowsAfter
-		} else {
-			removeDur = parsedDur
-		}
-	} else {
-		removeDur = removeRowsAfter
-	}
-
-	log.Infof("Service Failure and Hit records will be automatically removed after %s", removeDur.String())
-	go databaseMaintence(removeDur)
-}
-
-// databaseMaintence will automatically delete old records from 'failures' and 'hits'
+// Maintenance will automatically delete old records from 'failures' and 'hits'
 // this function is currently set to delete records 7+ days old every 60 minutes
-func databaseMaintence(dur time.Duration) {
-	//deleteAfter := time.Now().UTC().Add(dur)
+// env: REMOVE_AFTER - golang duration parsed time for deleting records older than REMOVE_AFTER duration from now
+// env: CLEANUP_INTERVAL - golang duration parsed time for checking old records routine
+func Maintenance() {
+	dur := utils.Params.GetDuration("REMOVE_AFTER")
+	interval := utils.Params.GetDuration("CLEANUP_INTERVAL")
 
-	time.Sleep(20 * types.Second)
+	log.Infof("Database Cleanup runs every %s and will remove records older than %s", interval.String(), dur.String())
+	ticker := interval
 
-	for range time.Tick(maintenceDuration) {
-		log.Infof("Deleting failures older than %s", dur.String())
-		//DeleteAllSince("failures", deleteAfter)
+	for {
+		select {
+		case <-time.After(ticker):
+			deleteAfter := utils.Now().Add(-dur)
 
-		log.Infof("Deleting hits older than %s", dur.String())
-		//DeleteAllSince("hits", deleteAfter)
+			log.Infof("Deleting failures older than %s", deleteAfter.String())
+			deleteAllSince("failures", deleteAfter)
 
-		maintenceDuration = types.Hour
+			log.Infof("Deleting hits older than %s", deleteAfter.String())
+			deleteAllSince("hits", deleteAfter)
+
+			ticker = interval
+		}
 	}
+
 }
 
-// DeleteAllSince will delete a specific table's records based on a time.
-func DeleteAllSince(table string, date time.Time) {
-	sql := fmt.Sprintf("DELETE FROM %s WHERE created_at < '%s';", table, database.FormatTime(date))
-	q := database.Exec(sql).Debug()
-	if q.Error() != nil {
-		log.Warnln(q.Error())
+// deleteAllSince will delete a specific table's records based on a time.
+func deleteAllSince(table string, date time.Time) {
+	sql := fmt.Sprintf("DELETE FROM %s WHERE created_at < '%s'", table, database.FormatTime(date))
+	log.Info(sql)
+	if err := database.Exec(sql).Error(); err != nil {
+		log.WithField("query", sql).Errorln(err)
 	}
 }

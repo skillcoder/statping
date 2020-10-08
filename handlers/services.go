@@ -1,24 +1,9 @@
-// Statping
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/statping/statping
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package handlers
 
 import (
 	"github.com/gorilla/mux"
-	"github.com/pkg/errors"
 	"github.com/statping/statping/database"
+	"github.com/statping/statping/types/errors"
 	"github.com/statping/statping/types/failures"
 	"github.com/statping/statping/types/hits"
 	"github.com/statping/statping/types/services"
@@ -31,12 +16,15 @@ type serviceOrder struct {
 	Order int   `json:"order"`
 }
 
-func serviceByID(r *http.Request) (*services.Service, error) {
+func findService(r *http.Request) (*services.Service, error) {
 	vars := mux.Vars(r)
 	id := utils.ToInt(vars["id"])
 	servicer, err := services.Find(id)
 	if err != nil {
-		return nil, errors.Errorf("service %d not found", id)
+		return nil, err
+	}
+	if !servicer.Public.Bool && !IsReadAuthenticated(r) {
+		return nil, errors.NotAuthenticated
 	}
 	return servicer, nil
 }
@@ -52,7 +40,7 @@ func reorderServiceHandler(w http.ResponseWriter, r *http.Request) {
 	for _, s := range newOrder {
 		service, err := services.Find(s.Id)
 		if err != nil {
-			sendErrorJson(errors.Errorf("service %d not found", s.Id), w, r)
+			sendErrorJson(err, w, r)
 			return
 		}
 		service.Order = s.Order
@@ -62,7 +50,7 @@ func reorderServiceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func apiServiceHandler(r *http.Request) interface{} {
-	srv, err := serviceByID(r)
+	srv, err := findService(r)
 	if err != nil {
 		return err
 	}
@@ -86,19 +74,57 @@ func apiCreateServiceHandler(w http.ResponseWriter, r *http.Request) {
 	sendJsonAction(service, "create", w, r)
 }
 
-func apiServiceUpdateHandler(w http.ResponseWriter, r *http.Request) {
-	service, err := serviceByID(r)
+type servicePatchReq struct {
+	Online  bool   `json:"online"`
+	Issue   string `json:"issue,omitempty"`
+	Latency int64  `json:"latency,omitempty"`
+}
+
+func apiServicePatchHandler(w http.ResponseWriter, r *http.Request) {
+	service, err := findService(r)
 	if err != nil {
-		sendErrorJson(err, w, r, http.StatusNotFound)
+		sendErrorJson(err, w, r)
 		return
 	}
-	if err := DecodeJSON(r, &service); err != nil {
-		sendErrorJson(err, w, r, http.StatusBadRequest)
+	var req servicePatchReq
+	if err := DecodeJSON(r, &req); err != nil {
+		sendErrorJson(err, w, r)
 		return
 	}
 
-	err = service.Update()
+	service.Online = req.Online
+	service.Latency = req.Latency
+
+	issueDefault := "Service was triggered to be offline"
+	if req.Issue != "" {
+		issueDefault = req.Issue
+	}
+
+	if !req.Online {
+		services.RecordFailure(service, issueDefault, "trigger")
+	} else {
+		services.RecordSuccess(service)
+	}
+
+	if err := service.Update(); err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
+	sendJsonAction(service, "update", w, r)
+}
+
+func apiServiceUpdateHandler(w http.ResponseWriter, r *http.Request) {
+	service, err := findService(r)
 	if err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+	if err := DecodeJSON(r, &service); err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+	if err := service.Update(); err != nil {
 		sendErrorJson(err, w, r)
 		return
 	}
@@ -106,25 +132,10 @@ func apiServiceUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	sendJsonAction(service, "update", w, r)
 }
 
-func apiServiceRunningHandler(w http.ResponseWriter, r *http.Request) {
-	service, err := serviceByID(r)
+func apiServiceDataHandler(w http.ResponseWriter, r *http.Request) {
+	service, err := findService(r)
 	if err != nil {
 		sendErrorJson(err, w, r)
-		return
-	}
-	if service.IsRunning() {
-		service.Close()
-	} else {
-		service.Start()
-	}
-	sendJsonAction(service, "running", w, r)
-}
-
-func apiServiceDataHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	service, err := services.Find(utils.ToInt(vars["id"]))
-	if err != nil {
-		sendErrorJson(errors.New("service data not found"), w, r)
 		return
 	}
 
@@ -143,10 +154,9 @@ func apiServiceDataHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func apiServiceFailureDataHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	service, err := services.Find(utils.ToInt(vars["id"]))
+	service, err := findService(r)
 	if err != nil {
-		sendErrorJson(errors.New("service data not found"), w, r)
+		sendErrorJson(err, w, r)
 		return
 	}
 
@@ -166,9 +176,9 @@ func apiServiceFailureDataHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func apiServicePingDataHandler(w http.ResponseWriter, r *http.Request) {
-	service, err := serviceByID(r)
+	service, err := findService(r)
 	if err != nil {
-		sendErrorJson(errors.New("service data not found"), w, r)
+		sendErrorJson(err, w, r)
 		return
 	}
 
@@ -187,8 +197,61 @@ func apiServicePingDataHandler(w http.ResponseWriter, r *http.Request) {
 	returnJson(objs, w, r)
 }
 
+func apiServiceTimeDataHandler(w http.ResponseWriter, r *http.Request) {
+	service, err := findService(r)
+	if err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
+	groupHits, err := database.ParseQueries(r, service.AllHits())
+	if err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
+	groupFailures, err := database.ParseQueries(r, service.AllFailures())
+	if err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
+	var allFailures []*failures.Failure
+	var allHits []*hits.Hit
+
+	if err := groupHits.Find(&allHits); err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
+	if err := groupFailures.Find(&allFailures); err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+
+	uptimeData, err := service.UptimeData(allHits, allFailures)
+	if err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+	returnJson(uptimeData, w, r)
+}
+
+func apiServiceHitsDeleteHandler(w http.ResponseWriter, r *http.Request) {
+	service, err := findService(r)
+	if err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+	if err := service.AllHits().DeleteAll(); err != nil {
+		sendErrorJson(err, w, r)
+		return
+	}
+	sendJsonAction(service, "delete", w, r)
+}
+
 func apiServiceDeleteHandler(w http.ResponseWriter, r *http.Request) {
-	service, err := serviceByID(r)
+	service, err := findService(r)
 	if err != nil {
 		sendErrorJson(err, w, r)
 		return
@@ -203,17 +266,23 @@ func apiServiceDeleteHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func apiAllServicesHandler(r *http.Request) interface{} {
-	return services.AllInOrder()
+	var srvs []services.Service
+	for _, v := range services.AllInOrder() {
+		if !v.Public.Bool && !IsUser(r) {
+			continue
+		}
+		srvs = append(srvs, v)
+	}
+	return srvs
 }
 
 func servicesDeleteFailuresHandler(w http.ResponseWriter, r *http.Request) {
-	service, err := serviceByID(r)
+	service, err := findService(r)
 	if err != nil {
 		sendErrorJson(err, w, r)
 		return
 	}
-	err = service.DeleteFailures()
-	if err != nil {
+	if err := service.AllFailures().DeleteAll(); err != nil {
 		sendErrorJson(err, w, r)
 		return
 	}
@@ -221,12 +290,10 @@ func servicesDeleteFailuresHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func apiServiceFailuresHandler(r *http.Request) interface{} {
-	vars := mux.Vars(r)
-	service, err := services.Find(utils.ToInt(vars["id"]))
+	service, err := findService(r)
 	if err != nil {
-		return errors.New("service not found")
+		return err
 	}
-
 	var fails []*failures.Failure
 	query, err := database.ParseQueries(r, service.AllFailures())
 	if err != nil {
@@ -237,12 +304,10 @@ func apiServiceFailuresHandler(r *http.Request) interface{} {
 }
 
 func apiServiceHitsHandler(r *http.Request) interface{} {
-	vars := mux.Vars(r)
-	service, err := services.Find(utils.ToInt(vars["id"]))
+	service, err := findService(r)
 	if err != nil {
-		return errors.New("service not found")
+		return err
 	}
-
 	var hts []*hits.Hit
 	query, err := database.ParseQueries(r, service.AllHits())
 	if err != nil {

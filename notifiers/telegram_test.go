@@ -1,27 +1,15 @@
-// Statup
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/hunterlong/statping
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package notifiers
 
 import (
 	"github.com/statping/statping/database"
+	"github.com/statping/statping/types/core"
+	"github.com/statping/statping/types/failures"
 	"github.com/statping/statping/types/notifications"
 	"github.com/statping/statping/types/null"
+	"github.com/statping/statping/types/services"
+	"github.com/statping/statping/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"os"
 	"testing"
 	"time"
 )
@@ -29,57 +17,64 @@ import (
 var (
 	telegramToken   string
 	telegramChannel string
-	telegramMessage = "The Telegram notifier on Statping has been tested!"
 )
 
-func init() {
-	telegramToken = os.Getenv("TELEGRAM_TOKEN")
-	telegramChannel = os.Getenv("TELEGRAM_CHANNEL")
-	Telegram.ApiSecret = telegramToken
-	Telegram.Var1 = telegramChannel
-}
-
 func TestTelegramNotifier(t *testing.T) {
-	t.Skip()
-	db, err := database.OpenTester()
+	err := utils.InitLogs()
 	require.Nil(t, err)
-	db.AutoMigrate(&notifications.Notification{})
-	notifications.SetDB(db)
 
+	t.Parallel()
+
+	telegramToken = utils.Params.GetString("TELEGRAM_TOKEN")
+	telegramChannel = utils.Params.GetString("TELEGRAM_CHANNEL")
 	if telegramToken == "" || telegramChannel == "" {
 		t.Log("Telegram notifier testing skipped, missing TELEGRAM_TOKEN and TELEGRAM_CHANNEL environment variable")
 		t.SkipNow()
 	}
 
+	Telegram.ApiSecret = null.NewNullString(telegramToken)
+	Telegram.Var1 = null.NewNullString(telegramChannel)
+
+	db, err := database.OpenTester()
+	require.Nil(t, err)
+	db.AutoMigrate(&notifications.Notification{})
+	notifications.SetDB(db)
+	core.Example()
+
 	t.Run("Load Telegram", func(t *testing.T) {
-		Telegram.ApiSecret = telegramToken
-		Telegram.Var1 = telegramChannel
+		Telegram.ApiSecret = null.NewNullString(telegramToken)
+		Telegram.Var1 = null.NewNullString(telegramChannel)
 		Telegram.Delay = time.Duration(1 * time.Second)
 		Telegram.Enabled = null.NewNullBool(true)
 
 		Add(Telegram)
 
 		assert.Equal(t, "Hunter Long", Telegram.Author)
-		assert.Equal(t, telegramToken, Telegram.ApiSecret)
-		assert.Equal(t, telegramChannel, Telegram.Var1)
+		assert.Equal(t, telegramToken, Telegram.ApiSecret.String)
+		assert.Equal(t, telegramChannel, Telegram.Var1.String)
 	})
 
 	t.Run("Telegram Within Limits", func(t *testing.T) {
 		assert.True(t, Telegram.CanSend())
 	})
 
+	t.Run("Telegram OnSave", func(t *testing.T) {
+		_, err := Telegram.OnSave()
+		assert.Nil(t, err)
+	})
+
 	t.Run("Telegram OnFailure", func(t *testing.T) {
-		err := Telegram.OnFailure(exampleService, exampleFailure)
+		_, err := Telegram.OnFailure(services.Example(false), failures.Example())
 		assert.Nil(t, err)
 	})
 
 	t.Run("Telegram OnSuccess", func(t *testing.T) {
-		err := Telegram.OnSuccess(exampleService)
+		_, err := Telegram.OnSuccess(services.Example(true))
 		assert.Nil(t, err)
 	})
 
 	t.Run("Telegram Test", func(t *testing.T) {
-		err := Telegram.OnTest()
+		_, err := Telegram.OnTest()
 		assert.Nil(t, err)
 	})
 

@@ -1,27 +1,14 @@
-// Statping
-// Copyright (C) 2018.  Hunter Long and the project contributors
-// Written by Hunter Long <info@socialeck.com> and the project contributors
-//
-// https://github.com/statping/statping
-//
-// The licenses for most software and other practical works are designed
-// to take away your freedom to share and change the works.  By contrast,
-// the GNU General Public License is intended to guarantee your freedom to
-// share and change all versions of a program--to make sure it remains free
-// software for all its users.
-//
-// You should have received a copy of the GNU General Public License
-// along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 package notifiers
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/statping/statping/types/failures"
 	"github.com/statping/statping/types/notifications"
 	"github.com/statping/statping/types/notifier"
+	"github.com/statping/statping/types/null"
 	"github.com/statping/statping/types/services"
 	"github.com/statping/statping/utils"
 	"net/url"
@@ -39,6 +26,10 @@ func (t *twilio) Select() *notifications.Notification {
 	return t.Notification
 }
 
+func (t *twilio) Valid(values notifications.Values) error {
+	return nil
+}
+
 var Twilio = &twilio{&notifications.Notification{
 	Method:      "twilio",
 	Title:       "Twilio",
@@ -47,6 +38,9 @@ var Twilio = &twilio{&notifications.Notification{
 	AuthorUrl:   "https://github.com/hunterlong",
 	Icon:        "far fa-comment-alt",
 	Delay:       time.Duration(10 * time.Second),
+	SuccessData: null.NewNullString("Your service '{{.Service.Name}}' is currently online!"),
+	FailureData: null.NewNullString("Your service '{{.Service.Name}}' is currently offline!"),
+	DataType:    "text",
 	Limits:      15,
 	Form: []notifications.NotificationForm{{
 		Type:        "text",
@@ -61,13 +55,13 @@ var Twilio = &twilio{&notifications.Notification{
 		DbField:     "api_secret",
 		Required:    true,
 	}, {
-		Type:        "text",
+		Type:        "number",
 		Title:       "SMS to Phone Number",
 		Placeholder: "18555555555",
 		DbField:     "Var1",
 		Required:    true,
 	}, {
-		Type:        "text",
+		Type:        "number",
 		Title:       "From Phone Number",
 		Placeholder: "18555555555",
 		DbField:     "Var2",
@@ -76,41 +70,51 @@ var Twilio = &twilio{&notifications.Notification{
 }
 
 // Send will send a HTTP Post to the Twilio SMS API. It accepts type: string
-func (t *twilio) sendMessage(message string) error {
-	twilioUrl := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%v/Messages.json", t.GetValue("api_key"))
+func (t *twilio) sendMessage(message string) (string, error) {
+	twilioUrl := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json", t.ApiKey.String)
 
 	v := url.Values{}
-	v.Set("To", "+"+t.Var1)
-	v.Set("From", "+"+t.Var2)
+	v.Set("To", "+"+t.Var1.String)
+	v.Set("From", "+"+t.Var2.String)
 	v.Set("Body", message)
-	rb := *strings.NewReader(v.Encode())
+	rb := strings.NewReader(v.Encode())
 
-	contents, _, err := utils.HttpRequest(twilioUrl, "POST", "application/x-www-form-urlencoded", nil, &rb, time.Duration(10*time.Second), true)
+	authHeader := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", t.ApiKey.String, t.ApiSecret.String)))
+
+	contents, _, err := utils.HttpRequest(twilioUrl, "POST", "application/x-www-form-urlencoded", []string{"Authorization=Basic " + authHeader}, rb, 10*time.Second, true, nil)
 	success, _ := twilioSuccess(contents)
 	if !success {
 		errorOut := twilioError(contents)
-		out := fmt.Sprintf("Error code %v - %v", errorOut.Code, errorOut.Message)
-		return errors.New(out)
+		if errorOut.Code == 0 {
+			return string(contents), nil
+		}
+		out := fmt.Sprintf("Error code %v - %s", errorOut.Code, errorOut.Message)
+		return string(contents), errors.New(out)
 	}
-	return err
+	return string(contents), err
 }
 
 // OnFailure will trigger failing service
-func (t *twilio) OnFailure(s *services.Service, f *failures.Failure) error {
-	msg := fmt.Sprintf("Your service '%v' is currently offline!", s.Name)
+func (t *twilio) OnFailure(s services.Service, f failures.Failure) (string, error) {
+	msg := ReplaceVars(t.FailureData.String, s, f)
 	return t.sendMessage(msg)
 }
 
 // OnSuccess will trigger successful service
-func (t *twilio) OnSuccess(s *services.Service) error {
-	msg := fmt.Sprintf("Your service '%v' is currently online!", s.Name)
+func (t *twilio) OnSuccess(s services.Service) (string, error) {
+	msg := ReplaceVars(t.SuccessData.String, s, failures.Failure{})
 	return t.sendMessage(msg)
 }
 
 // OnTest will test the Twilio SMS messaging
-func (t *twilio) OnTest() error {
+func (t *twilio) OnTest() (string, error) {
 	msg := fmt.Sprintf("Testing the Twilio SMS Notifier")
 	return t.sendMessage(msg)
+}
+
+// OnSave will trigger when this notifier is saved
+func (t *twilio) OnSave() (string, error) {
+	return "", nil
 }
 
 func twilioSuccess(res []byte) (bool, twilioResponse) {
